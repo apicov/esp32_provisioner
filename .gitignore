@@ -1,0 +1,41 @@
+# ESP-IDF build output
+build/
+
+# sdkconfig (generated from sdkconfig.defaults)
+# NOTE: sdkconfig.defaults IS tracked and should be committed
+sdkconfig
+sdkconfig.old
+
+# Editor temp files
+*.swp
+*.swo
+*~
+
+# Dependencies
+dependencies.lock
+managed_components/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+
+# IDEs
+.vscode/
+.idea/
+*.iml
+.DS_Store
+
+# Logs
+*.log
+
+# NVS partition data
+nvs.bin
+nvs_encrypted.bin
+
+# Flash downloads
+flash_*.bin
+
+# Generated files
+compile_commands.json

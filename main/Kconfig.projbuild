@@ -1,0 +1,75 @@
+menu "ESP32 Mesh Gateway Configuration"
+
+    menu "WiFi Configuration"
+        config WIFI_SSID
+            string "WiFi SSID"
+            default "myssid"
+            help
+                SSID (network name) for the gateway to connect to.
+
+        config WIFI_PASSWORD
+            string "WiFi Password"
+            default "mypassword"
+            help
+                WiFi password (WPA or WPA2) for the gateway to use.
+
+        config WIFI_MAXIMUM_RETRY
+            int "Maximum retry"
+            default 5
+            help
+                Set the Maximum retry to avoid station reconnecting to the AP unlimited when the AP is really inexistent.
+    endmenu
+
+    menu "MQTT Configuration"
+        config MQTT_BROKER_URI
+            string "MQTT Broker URI"
+            default "mqtt://192.168.1.100:1883"
+            help
+                URI of the MQTT broker to connect to.
+                Examples:
+                - mqtt://192.168.1.100:1883 (local broker)
+                - mqtt://test.mosquitto.org:1883 (public test broker)
+                - mqtts://broker.example.com:8883 (TLS encrypted)
+
+        config MQTT_CLIENT_ID
+            string "MQTT Client ID"
+            default "esp32_mesh_gateway"
+            help
+                Client ID for MQTT connection. Must be unique if multiple gateways connect to same broker.
+
+        config MQTT_USERNAME
+            string "MQTT Username"
+            default ""
+            help
+                Username for MQTT authentication (leave empty if not required).
+
+        config MQTT_PASSWORD
+            string "MQTT Password"
+            default ""
+            help
+                Password for MQTT authentication (leave empty if not required).
+
+        config MQTT_TOPIC_PREFIX
+            string "MQTT Topic Prefix"
+            default "esp32"
+            help
+                Prefix for MQTT topics. Sensor data will be published to <prefix>/sensor/data.
+    endmenu
+
+    menu "BLE Mesh Configuration"
+        config MESH_UUID_PREFIX_0
+            hex "M5Stick UUID Prefix Byte 0"
+            default 0xAA
+            range 0x00 0xFF
+            help
+                First byte of M5Stick device UUID prefix for auto-provisioning.
+
+        config MESH_UUID_PREFIX_1
+            hex "M5Stick UUID Prefix Byte 1"
+            default 0xBB
+            range 0x00 0xFF
+            help
+                Second byte of M5Stick device UUID prefix for auto-provisioning.
+    endmenu
+
+endmenu

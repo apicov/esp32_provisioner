@@ -1,0 +1,277 @@
+#include "ble_mesh_provisioner.h"
+#include "ble_mesh_callbacks.h"
+#include "ble_mesh_storage.h"
+
+#include "esp_log.h"
+#include "esp_bt.h"
+#include "esp_bt_main.h"
+#include "esp_bt_device.h"
+
+#include "esp_ble_mesh_defs.h"
+#include "esp_ble_mesh_common_api.h"
+#include "esp_ble_mesh_provisioning_api.h"
+#include "esp_ble_mesh_networking_api.h"
+#include "esp_ble_mesh_config_model_api.h"
+#include "esp_ble_mesh_generic_model_api.h"
+
+#include <string.h>
+
+#define TAG "BLE_MESH_PROV"
+
+#define CID_ESP 0x02E5
+#define APP_KEY_OCTET 0x12
+
+// Internal state
+static uint8_t dev_uuid[16];
+static provisioner_config_t prov_config;
+static provisioner_callbacks_t prov_callbacks;
+
+// Mesh structures (exported for callbacks)
+esp_ble_mesh_client_t config_client;
+esp_ble_mesh_client_t onoff_client;
+
+struct esp_ble_mesh_key {
+    uint16_t net_idx;
+    uint16_t app_idx;
+    uint8_t  app_key[16];
+};
+
+struct esp_ble_mesh_key prov_key = {
+    .net_idx = 0,
+    .app_idx = 0,
+    .app_key = {0}
+};
+
+static esp_ble_mesh_cfg_srv_t config_server = {
+    .net_transmit = ESP_BLE_MESH_TRANSMIT(2, 20),
+    .relay = ESP_BLE_MESH_RELAY_DISABLED,
+    .relay_retransmit = ESP_BLE_MESH_TRANSMIT(2, 20),
+    .beacon = ESP_BLE_MESH_BEACON_ENABLED,
+#if defined(CONFIG_BLE_MESH_GATT_PROXY_SERVER)
+    .gatt_proxy = ESP_BLE_MESH_GATT_PROXY_ENABLED,
+#else
+    .gatt_proxy = ESP_BLE_MESH_GATT_PROXY_NOT_SUPPORTED,
+#endif
+#if defined(CONFIG_BLE_MESH_FRIEND)
+    .friend_state = ESP_BLE_MESH_FRIEND_ENABLED,
+#else
+    .friend_state = ESP_BLE_MESH_FRIEND_NOT_SUPPORTED,
+#endif
+    .default_ttl = 7,
+};
+
+static esp_ble_mesh_model_t root_models[] = {
+    ESP_BLE_MESH_MODEL_CFG_SRV(&config_server),
+    ESP_BLE_MESH_MODEL_CFG_CLI(&config_client),
+    ESP_BLE_MESH_MODEL_GEN_ONOFF_CLI(NULL, &onoff_client),
+};
+
+static esp_ble_mesh_elem_t elements[] = {
+    ESP_BLE_MESH_ELEMENT(0, root_models, ESP_BLE_MESH_MODEL_NONE),
+};
+
+static esp_ble_mesh_comp_t composition = {
+    .cid = CID_ESP,
+    .element_count = ARRAY_SIZE(elements),
+    .elements = elements,
+};
+
+// Provision structure - will be initialized properly before use
+static esp_ble_mesh_prov_t provision;
+
+static void generate_dev_uuid(uint8_t *uuid, const uint8_t *prefix)
+{
+    if (!uuid) {
+        ESP_LOGE(TAG, "Invalid device uuid");
+        return;
+    }
+
+    memset(uuid, 0, 16);
+    uuid[0] = prefix[0];
+    uuid[1] = prefix[1];
+    memcpy(uuid + 2, esp_bt_dev_get_address(), BD_ADDR_LEN);
+}
+
+static esp_err_t bluetooth_init(void)
+{
+    esp_err_t ret;
+
+    ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
+
+    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+    ret = esp_bt_controller_init(&bt_cfg);
+    if (ret) {
+        ESP_LOGE(TAG, "Initialize controller failed");
+        return ret;
+    }
+
+    ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
+    if (ret) {
+        ESP_LOGE(TAG, "Enable controller failed");
+        return ret;
+    }
+
+    ret = esp_bluedroid_init();
+    if (ret) {
+        ESP_LOGE(TAG, "Init bluetooth failed");
+        return ret;
+    }
+
+    ret = esp_bluedroid_enable();
+    if (ret) {
+        ESP_LOGE(TAG, "Enable bluetooth failed");
+        return ret;
+    }
+
+    return ret;
+}
+
+esp_err_t provisioner_init(const provisioner_config_t *config, const provisioner_callbacks_t *callbacks)
+{
+    esp_err_t err;
+
+    if (!config) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // Store configuration
+    memcpy(&prov_config, config, sizeof(provisioner_config_t));
+    if (callbacks) {
+        memcpy(&prov_callbacks, callbacks, sizeof(provisioner_callbacks_t));
+    }
+
+    // Initialize storage
+    err = mesh_storage_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Storage init failed");
+        return err;
+    }
+
+    // Initialize Bluetooth
+    err = bluetooth_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Bluetooth init failed");
+        return err;
+    }
+
+    // Generate device UUID
+    generate_dev_uuid(dev_uuid, config->match_prefix);
+
+    // Initialize provision structure using temporary to handle const fields
+    esp_ble_mesh_prov_t temp_prov = {
+        .uuid = dev_uuid,
+        .prov_uuid = dev_uuid,
+        .prov_unicast_addr = config->own_address,
+        .prov_start_address = config->node_start_address,
+        .prov_attention = 0x00,
+        .prov_algorithm = 0x00,
+        .prov_pub_key_oob = 0x00,
+        .prov_static_oob_val = NULL,
+        .prov_static_oob_len = 0x00,
+        .flags = 0x00,
+        .iv_index = 0x00,
+    };
+    memcpy(&provision, &temp_prov, sizeof(provision));
+
+    // Setup keys
+    prov_key.net_idx = config->net_idx;
+    prov_key.app_idx = config->app_idx;
+    memset(prov_key.app_key, APP_KEY_OCTET, sizeof(prov_key.app_key));
+
+    // Register callbacks
+    esp_ble_mesh_register_prov_callback(mesh_provisioning_cb);
+    esp_ble_mesh_register_config_client_callback(mesh_config_client_cb);
+    esp_ble_mesh_register_generic_client_callback(mesh_generic_client_cb);
+
+    // Initialize BLE Mesh
+    err = esp_ble_mesh_init(&provision, &composition);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize mesh stack");
+        return err;
+    }
+
+    // Set UUID matching
+    err = esp_ble_mesh_provisioner_set_dev_uuid_match(config->match_prefix, 2, 0x0, false);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set matching device uuid");
+        return err;
+    }
+
+    ESP_LOGI(TAG, "Provisioner initialized successfully");
+    return ESP_OK;
+}
+
+esp_err_t provisioner_start(void)
+{
+    esp_err_t err;
+
+    // Enable provisioner
+    err = esp_ble_mesh_provisioner_prov_enable((esp_ble_mesh_prov_bearer_t)(ESP_BLE_MESH_PROV_ADV | ESP_BLE_MESH_PROV_GATT));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to enable provisioner");
+        return err;
+    }
+
+    // Add local app key
+    err = esp_ble_mesh_provisioner_add_local_app_key(prov_key.app_key, prov_key.net_idx, prov_key.app_idx);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to add local app key");
+        return err;
+    }
+
+    ESP_LOGI(TAG, "Provisioner started");
+    return ESP_OK;
+}
+
+esp_err_t provisioner_stop(void)
+{
+    esp_err_t err;
+
+    err = esp_ble_mesh_provisioner_prov_disable((esp_ble_mesh_prov_bearer_t)(ESP_BLE_MESH_PROV_ADV | ESP_BLE_MESH_PROV_GATT));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to disable provisioner");
+        return err;
+    }
+
+    ESP_LOGI(TAG, "Provisioner stopped");
+    return ESP_OK;
+}
+
+esp_err_t provisioner_send_onoff(uint16_t unicast, bool onoff)
+{
+    esp_ble_mesh_generic_client_set_state_t set_state = {0};
+    esp_ble_mesh_client_common_param_t common = {0};
+    mesh_node_info_t node_info;
+    esp_err_t err;
+
+    err = mesh_storage_get_node(unicast, &node_info);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Node not found");
+        return err;
+    }
+
+    common.opcode = ESP_BLE_MESH_MODEL_OP_GEN_ONOFF_SET;
+    common.model = onoff_client.model;
+    common.ctx.net_idx = prov_key.net_idx;
+    common.ctx.app_idx = prov_key.app_idx;
+    common.ctx.addr = unicast;
+    common.ctx.send_ttl = 3;
+    common.msg_timeout = 0;
+
+    set_state.onoff_set.op_en = false;
+    set_state.onoff_set.onoff = onoff ? 1 : 0;
+    set_state.onoff_set.tid = 0;
+
+    err = esp_ble_mesh_generic_client_set_state(&common, &set_state);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to send onoff command");
+        return err;
+    }
+
+    return ESP_OK;
+}
+
+uint16_t provisioner_get_node_count(void)
+{
+    return mesh_storage_get_node_count();
+}
