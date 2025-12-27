@@ -32,4 +32,12 @@ bool configure_next_publication(uint16_t addr, mesh_node_info_t *node_info,
                                 esp_ble_mesh_client_common_param_t *common,
                                 struct esp_ble_mesh_key *prov_key);
 
+/*
+ * Configure subscription for next model
+ * Returns true if config initiated, false if all models configured
+ */
+bool subscribe_next_model(uint16_t addr, mesh_node_info_t *node_info,
+                          esp_ble_mesh_client_common_param_t *common,
+                          struct esp_ble_mesh_key *prov_key);
+
 #endif // BLE_MESH_AUTO_CONFIG_H

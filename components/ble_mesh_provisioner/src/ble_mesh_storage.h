@@ -15,6 +15,7 @@ typedef struct {
     bool is_vendor;
     bool appkey_bound;    // Track if AppKey is bound to this model
     bool pub_configured;  // Track if publication is configured
+    bool sub_configured;  // Track if subscription is configured
 } node_model_info_t;
 
 typedef struct {
@@ -30,6 +31,7 @@ typedef struct {
     // Configuration state tracking
     uint8_t next_model_to_bind;  // Index of next model to bind
     uint8_t next_model_to_pub;   // Index of next model to configure publication
+    uint8_t next_model_to_sub;   // Index of next model to configure subscription
     bool composition_received;
     bool appkey_added;
 } mesh_node_info_t;

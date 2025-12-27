@@ -161,6 +161,7 @@
 #include "ble_mesh_auto_config.h"
 #include "esp_log.h"
 #include "esp_ble_mesh_networking_api.h"
+#include "esp_ble_mesh_local_data_operation_api.h"
 #include "mesh/utils.h"
 #include <string.h>
 #include <inttypes.h>
@@ -601,6 +602,15 @@ void mesh_provisioning_cb(esp_ble_mesh_prov_cb_event_t event,
                 ESP_LOGE(TAG, "Provisioner bind Sensor Client failed");
             }
 
+            // Subscribe provisioner's Sensor Client to sensor group (0xC001) to receive sensor data
+            err = esp_ble_mesh_model_subscribe_group_addr(PROV_OWN_ADDR, ESP_BLE_MESH_CID_NVAL,
+                    ESP_BLE_MESH_MODEL_ID_SENSOR_CLI, 0xC001);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "Provisioner subscribe to sensor group failed: %d", err);
+            } else {
+                ESP_LOGI(TAG, "Provisioner subscribed to sensor group 0xC001");
+            }
+
             // Bind Vendor Client model to receive bulk IMU data
             err = esp_ble_mesh_provisioner_bind_app_key_to_local_model(PROV_OWN_ADDR, prov_key.app_idx,
                     0x0000, 0x0001);  // Vendor model: model_id=0x0000 (CLIENT), company_id=0x0001
@@ -668,11 +678,13 @@ void mesh_config_client_cb(esp_ble_mesh_cfg_client_cb_event_t event,
                 node_info.models[i].is_vendor = discovered[i].is_vendor;
                 node_info.models[i].appkey_bound = false;
                 node_info.models[i].pub_configured = false;
+                node_info.models[i].sub_configured = false;
             }
             node_info.composition_received = true;
             node_info.appkey_added = false;
             node_info.next_model_to_bind = 0;
             node_info.next_model_to_pub = 0;
+            node_info.next_model_to_sub = 0;
 
             // Update storage with discovered models
             err = mesh_storage_update_node(addr, &node_info);
@@ -741,7 +753,14 @@ void mesh_config_client_cb(esp_ble_mesh_cfg_client_cb_event_t event,
                 ESP_LOGI(TAG, "🔧 All models bound - configuring publications");
                 mesh_set_msg_common(&common, addr, config_client.model, ESP_BLE_MESH_MODEL_OP_MODEL_PUB_SET);
                 if (!configure_next_publication(addr, &node_info, &common, &prov_key)) {
-                    ESP_LOGI(TAG, "🎉 Node fully configured!");
+                    // Publications done - configure subscriptions
+                    ESP_LOGI(TAG, "🔧 Publications done - configuring subscriptions");
+                    mesh_set_msg_common(&common, addr, config_client.model, ESP_BLE_MESH_MODEL_OP_MODEL_SUB_ADD);
+                    if (!subscribe_next_model(addr, &node_info, &common, &prov_key)) {
+                        ESP_LOGI(TAG, "🎉 Node fully configured and ready!");
+                    } else {
+                        mesh_storage_update_node(addr, &node_info);
+                    }
                 } else {
                     mesh_storage_update_node(addr, &node_info);
                 }
@@ -779,6 +798,45 @@ void mesh_config_client_cb(esp_ble_mesh_cfg_client_cb_event_t event,
             // Configure next publication
             mesh_set_msg_common(&common, addr, config_client.model, ESP_BLE_MESH_MODEL_OP_MODEL_PUB_SET);
             if (!configure_next_publication(addr, &node_info, &common, &prov_key)) {
+                // Publications done - configure subscriptions
+                ESP_LOGI(TAG, "🔧 Publications done - configuring subscriptions");
+                mesh_set_msg_common(&common, addr, config_client.model, ESP_BLE_MESH_MODEL_OP_MODEL_SUB_ADD);
+                if (!subscribe_next_model(addr, &node_info, &common, &prov_key)) {
+                    ESP_LOGI(TAG, "🎉 Node fully configured and ready!");
+                } else {
+                    mesh_storage_update_node(addr, &node_info);
+                }
+            } else {
+                mesh_storage_update_node(addr, &node_info);
+            }
+        } else if (opcode == ESP_BLE_MESH_MODEL_OP_MODEL_SUB_ADD) {
+            /*
+             * ════════════════════════════════════════════════════════════════
+             *              AUTOMATIC SUBSCRIPTION CONFIGURATION
+             * ════════════════════════════════════════════════════════════════
+             *
+             * This handler processes subscription configuration responses and
+             * continues configuring remaining client models sequentially.
+             */
+            uint16_t sub_model_id = param->status_cb.model_sub_status.model_id;
+            uint16_t sub_company_id = param->status_cb.model_sub_status.company_id;
+
+            ESP_LOGI(TAG, "✅ Subscription configured: 0x%04x (CID=0x%04x)", sub_model_id, sub_company_id);
+
+            // Mark this model's subscription as configured
+            for (int i = 0; i < node_info.model_count; i++) {
+                if (node_info.models[i].model_id == sub_model_id &&
+                    node_info.models[i].company_id == sub_company_id) {
+                    node_info.models[i].sub_configured = true;
+                    break;
+                }
+            }
+            node_info.next_model_to_sub++;
+            mesh_storage_update_node(addr, &node_info);
+
+            // Configure next subscription
+            mesh_set_msg_common(&common, addr, config_client.model, ESP_BLE_MESH_MODEL_OP_MODEL_SUB_ADD);
+            if (!subscribe_next_model(addr, &node_info, &common, &prov_key)) {
                 ESP_LOGI(TAG, "🎉 Node fully configured and ready!");
             } else {
                 mesh_storage_update_node(addr, &node_info);

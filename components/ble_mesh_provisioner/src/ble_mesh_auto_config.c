@@ -62,6 +62,53 @@ static bool model_supports_publication(uint16_t model_id, uint16_t company_id)
 }
 
 /*
+ * HELPER: Get publication address for a model type
+ * Sensor models publish to group 0xC001, others to provisioner
+ */
+static uint16_t get_publication_address(uint16_t model_id)
+{
+    switch (model_id) {
+    case 0x1100:  // Sensor Server - publish to sensor group
+        return 0xC001;
+    default:
+        return 0x0001;  // Publish to provisioner
+    }
+}
+
+/*
+ * HELPER: Check if model supports subscription
+ * Client models can subscribe to receive data from servers.
+ */
+static bool model_supports_subscription(uint16_t model_id, uint16_t company_id)
+{
+    // Skip vendor models for now
+    if (company_id != ESP_BLE_MESH_CID_NVAL) {
+        return false;
+    }
+
+    // SIG client models that support subscription
+    switch (model_id) {
+    case 0x1102:  // Sensor Client
+        return true;
+    default:
+        return false;
+    }
+}
+
+/*
+ * HELPER: Get subscription address for a client model
+ */
+static uint16_t get_subscription_address(uint16_t model_id)
+{
+    switch (model_id) {
+    case 0x1102:  // Sensor Client - subscribe to sensor group
+        return 0xC001;
+    default:
+        return 0xC000;  // Default group
+    }
+}
+
+/*
  * HELPER: Check if model should be bound to AppKey
  * Config models (0x0000, 0x0001) use DevKey, not AppKey.
  */
@@ -171,8 +218,11 @@ bool configure_next_publication(uint16_t addr, mesh_node_info_t *node_info,
         esp_ble_mesh_cfg_client_set_state_t set_state = {0};
         common->opcode = ESP_BLE_MESH_MODEL_OP_MODEL_PUB_SET;
 
+        uint16_t pub_addr = get_publication_address(model->model_id);
+        ESP_LOGI(TAG, "    Publishing to: 0x%04x", pub_addr);
+
         set_state.model_pub_set.element_addr = node_info->unicast;
-        set_state.model_pub_set.publish_addr = 0x0001;  // Publish to provisioner (using PUBLISH mechanism)
+        set_state.model_pub_set.publish_addr = pub_addr;  // Use model-specific publish address
         set_state.model_pub_set.publish_app_idx = prov_key->app_idx;
         set_state.model_pub_set.publish_ttl = 7;
         set_state.model_pub_set.publish_period = 0;  // Manual publishing
@@ -191,6 +241,63 @@ bool configure_next_publication(uint16_t addr, mesh_node_info_t *node_info,
     }
 
     // All models processed
-    ESP_LOGI(TAG, "🎉 All publications configured! Node is ready!");
+    ESP_LOGI(TAG, "✅ All publications configured!");
+    return false;
+}
+
+/*
+ * Configure next subscription in sequence
+ * Returns true if subscription was initiated, false if all done
+ */
+bool subscribe_next_model(uint16_t addr, mesh_node_info_t *node_info,
+                          esp_ble_mesh_client_common_param_t *common,
+                          struct esp_ble_mesh_key *prov_key)
+{
+    // Find next model that needs subscription
+    while (node_info->next_model_to_sub < node_info->model_count) {
+        int idx = node_info->next_model_to_sub;
+        node_model_info_t *model = &node_info->models[idx];
+
+        // Skip if already subscribed
+        if (model->sub_configured) {
+            node_info->next_model_to_sub++;
+            continue;
+        }
+
+        // Skip if model doesn't support subscription
+        if (!model_supports_subscription(model->model_id, model->company_id)) {
+            model->sub_configured = true;  // Mark as "done"
+            node_info->next_model_to_sub++;
+            continue;
+        }
+
+        // Configure subscription for this model
+        ESP_LOGI(TAG, "  Configuring subscription [%d/%d]: 0x%04x (CID=0x%04x)",
+                 idx + 1, node_info->model_count,
+                 model->model_id, model->company_id);
+
+        uint16_t sub_addr = get_subscription_address(model->model_id);
+        ESP_LOGI(TAG, "    Subscribing to: 0x%04x", sub_addr);
+
+        esp_ble_mesh_cfg_client_set_state_t set_state = {0};
+        common->opcode = ESP_BLE_MESH_MODEL_OP_MODEL_SUB_ADD;
+
+        set_state.model_sub_add.element_addr = node_info->unicast;
+        set_state.model_sub_add.sub_addr = sub_addr;
+        set_state.model_sub_add.company_id = model->company_id;
+        set_state.model_sub_add.model_id = model->model_id;
+
+        esp_err_t err = esp_ble_mesh_config_client_set_state(common, &set_state);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "  Sub config failed for model 0x%04x, err=%d", model->model_id, err);
+            node_info->next_model_to_sub++;
+            continue;  // Try next model
+        }
+
+        return true;  // Config initiated, wait for response
+    }
+
+    // All models processed
+    ESP_LOGI(TAG, "🎉 All subscriptions configured! Node is ready!");
     return false;
 }
