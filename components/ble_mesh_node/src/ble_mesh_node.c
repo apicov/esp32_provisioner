@@ -430,10 +430,9 @@ esp_err_t node_init(const node_config_t *config)
     // Step 3.5: Initialize provision structure
     // The struct fields depend on whether PROVISIONER role is also enabled
     esp_ble_mesh_prov_t temp_prov = {
-        .uuid = dev_uuid,                 // Our UUID (for being discovered/provisioned)
 #if CONFIG_BLE_MESH_PROVISIONER
         // Dual role (node + provisioner): use provisioner-style fields
-        .prov_uuid = dev_uuid,            // Same UUID (for dual role support)
+        .prov_uuid = dev_uuid,            // UUID for dual role support
         .prov_unicast_addr = 0,           // Will be assigned during provisioning
         .prov_start_address = 0,          // Not used by pure node
         .prov_attention = 0x00,           // Attention timer
@@ -444,7 +443,8 @@ esp_err_t node_init(const node_config_t *config)
         .flags = 0x00,                    // No special flags
         .iv_index = 0x00,                 // Will be set by provisioner
 #else
-        // Node-only mode: use node-specific OOB fields
+        // Node-only mode: use node-specific fields
+        .uuid = dev_uuid,                 // Our UUID (for being discovered/provisioned)
         .output_size = 0,                 // No output OOB capability
         .output_actions = 0,              // No output actions
 #endif

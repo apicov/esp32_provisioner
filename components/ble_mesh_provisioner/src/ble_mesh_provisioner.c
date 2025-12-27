@@ -484,8 +484,12 @@ esp_err_t provisioner_init(const provisioner_config_t *config, const provisioner
     // STEP 5: Initialize provision structure
     // This must be done at runtime because some fields (addresses) come from config
     // We use a temporary struct then memcpy to handle const fields in the struct
+    // Note: When CONFIG_BLE_MESH_PROVISIONER=y and CONFIG_BLE_MESH_NODE=n,
+    //       only .prov_uuid exists (not .uuid)
     esp_ble_mesh_prov_t temp_prov = {
-        .uuid = dev_uuid,                           // Our UUID (for being provisioned)
+#if CONFIG_BLE_MESH_NODE
+        .uuid = dev_uuid,                           // Our UUID (for being provisioned as node)
+#endif
         .prov_uuid = dev_uuid,                      // Our UUID (as provisioner)
         .prov_unicast_addr = config->own_address,   // Our address in the mesh
         .prov_start_address = config->node_start_address, // Where to start assigning addresses

@@ -33,6 +33,11 @@ CONFIG_BT_BLE_ENABLED=y
 CONFIG_BT_GATTS_ENABLE=y
 CONFIG_BT_GATTC_ENABLE=y
 
+# BLE 4.2 Features (Required for BLE Mesh BTM_BleScan API)
+# ---------------------------------------------------------
+CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y
+CONFIG_BT_BLE_42_FEATURES_ENABLED=y
+
 # BLE Mesh Core
 # -------------
 CONFIG_BLE_MESH=y
@@ -51,8 +56,15 @@ CONFIG_BLE_MESH_SENSOR_CLI=y
 # ------------------------------
 # Critical for handling multiple nodes and high-frequency data
 CONFIG_BLE_MESH_ADV_BUF_COUNT=60
-CONFIG_BLE_MESH_BLE_ADV_BUF_COUNT=3
+CONFIG_BLE_MESH_BLE_ADV_BUF_COUNT=20
 CONFIG_BLE_MESH_SUPPORT_BLE_ADV=y
+
+# Increase segmented message buffers for better reliability with WiFi coexistence
+CONFIG_BLE_MESH_TX_SEG_MSG_COUNT=4
+CONFIG_BLE_MESH_RX_SEG_MSG_COUNT=4
+
+# Enable BLE scan support for ESP32-C6 compatibility
+CONFIG_BLE_MESH_SUPPORT_BLE_SCAN=y
 
 # BLE Mesh Provisioner Limits
 # ----------------------------
@@ -78,5 +90,12 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096
 
 # Partition Table
 # ---------------
-CONFIG_PARTITION_TABLE_CUSTOM=n
-CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+# Use custom partition table with larger app partition (2MB for BLE Mesh + WiFi/MQTT)
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# Flash Size - 4MB
+# ----------------
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"

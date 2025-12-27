@@ -233,6 +233,10 @@ extern esp_ble_mesh_client_t config_client;
 extern esp_ble_mesh_client_t onoff_client;
 extern struct esp_ble_mesh_key prov_key;
 
+// Forward declarations for weak functions that can be overridden
+void provisioner_vendor_msg_handler(uint16_t src_addr, uint32_t opcode, uint8_t *data, uint16_t length);
+void provisioner_sensor_msg_handler(uint16_t src_addr, uint16_t property_id, int32_t value);
+
 /*
  * COMPOSITION DATA PARSER
  * =======================
@@ -1174,6 +1178,9 @@ void mesh_sensor_client_cb(esp_ble_mesh_sensor_client_cb_event_t event,
                         int32_t value = net_buf_simple_pull_le32(buf);
                         ESP_LOGI(TAG, "  ✅ Sensor 0x%04x = %d", property_id, (int)value);
 
+                        // Call external handler (can be overridden by mesh_mqtt_bridge)
+                        provisioner_sensor_msg_handler(addr, property_id, value);
+
                         // REAL-WORLD INTERPRETATION EXAMPLES:
                         // ------------------------------------
                         // If property_id == 0x5001 (Accel X):
@@ -1189,6 +1196,9 @@ void mesh_sensor_client_cb(esp_ble_mesh_sensor_client_cb_event_t event,
                         int16_t value = (int16_t)net_buf_simple_pull_le16(buf);
                         ESP_LOGI(TAG, "  ✅ Sensor 0x%04x = %d", property_id, (int)value);
 
+                        // Call external handler
+                        provisioner_sensor_msg_handler(addr, property_id, (int32_t)value);
+
                         // Used by some standard sensors (e.g., temperature in 0.01°C)
                         // Example: 2543 = 25.43°C
 
@@ -1196,6 +1206,9 @@ void mesh_sensor_client_cb(esp_ble_mesh_sensor_client_cb_event_t event,
                         // Read 1-byte signed integer
                         int8_t value = (int8_t)net_buf_simple_pull_u8(buf);
                         ESP_LOGI(TAG, "  ✅ Sensor 0x%04x = %d", property_id, (int)value);
+
+                        // Call external handler
+                        provisioner_sensor_msg_handler(addr, property_id, (int32_t)value);
 
                         // Used by simple sensors (e.g., battery percentage 0-100)
 
@@ -1296,6 +1309,17 @@ void mesh_sensor_client_cb(esp_ble_mesh_sensor_client_cb_event_t event,
  */
 __attribute__((weak)) void provisioner_vendor_msg_handler(uint16_t src_addr, uint32_t opcode,
                                                            uint8_t *data, uint16_t length)
+{
+    // Default: do nothing
+    // External components can override this function
+}
+
+/**
+ * Weak function for sensor message handling
+ * Can be overridden by mesh_mqtt_bridge or other components
+ */
+__attribute__((weak)) void provisioner_sensor_msg_handler(uint16_t src_addr, uint16_t property_id,
+                                                           int32_t value)
 {
     // Default: do nothing
     // External components can override this function

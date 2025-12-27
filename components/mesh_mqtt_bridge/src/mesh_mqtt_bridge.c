@@ -10,8 +10,10 @@
 #include "mesh_mqtt_bridge.h"
 #include "wifi_mqtt.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include <string.h>
 #include <stdio.h>
+#include <inttypes.h>
 
 static const char *TAG = "MESH_MQTT_BRIDGE";
 
@@ -22,12 +24,37 @@ static bool g_bridge_initialized = false;
 // Vendor opcodes (must match node definitions)
 #define VENDOR_OP_IMU_DATA  0xC00001
 
+// Sensor property IDs (from BLE Mesh spec)
+#define SENSOR_PROPERTY_HEART_RATE  0x2A37
+
 /**
  * ===========================================================================
  *                           MESSAGE HANDLERS
  * ===========================================================================
  * Each handler processes a specific vendor opcode and publishes to MQTT
  */
+
+/**
+ * Handle heart rate sensor messages
+ */
+static void handle_heartrate_message(uint16_t src_addr, int32_t heart_rate)
+{
+    // Get current timestamp in milliseconds
+    uint32_t timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000);
+
+    // Format JSON payload with timestamp
+    char payload[128];
+    snprintf(payload, sizeof(payload),
+             "{\"node\":\"0x%04x\",\"heartrate\":%d,\"timestamp\":%" PRIu32 "}",
+             src_addr, (int)heart_rate, timestamp_ms);
+
+    // Publish to MQTT
+    char topic[64];
+    snprintf(topic, sizeof(topic), "%s/heartrate/0x%04x", g_bridge_config.mqtt_topic_prefix, src_addr);
+
+    ESP_LOGI(TAG, "Publishing HR from 0x%04x: %d bpm to %s", src_addr, (int)heart_rate, topic);
+    wifi_mqtt_publish(topic, payload, 0);
+}
 
 /**
  * Handle IMU data messages
@@ -102,6 +129,32 @@ static const message_route_t message_router[] = {
 };
 
 #define ROUTER_SIZE (sizeof(message_router) / sizeof(message_route_t))
+
+/**
+ * ===========================================================================
+ *                      SENSOR MESSAGE HANDLER (OVERRIDE)
+ * ===========================================================================
+ *
+ * This function OVERRIDES the weak function in ble_mesh_callbacks.c
+ * It gets called for every sensor message received from the mesh network.
+ */
+
+void provisioner_sensor_msg_handler(uint16_t src_addr, uint16_t property_id, int32_t value)
+{
+    if (!g_bridge_initialized) {
+        return;  // Bridge not initialized, ignore messages
+    }
+
+    ESP_LOGD(TAG, "Received sensor message: property=0x%04x, src=0x%04x, value=%d",
+             property_id, src_addr, (int)value);
+
+    // Route sensor messages based on property ID
+    if (property_id == SENSOR_PROPERTY_HEART_RATE) {
+        handle_heartrate_message(src_addr, value);
+    } else {
+        ESP_LOGD(TAG, "Unhandled sensor property: 0x%04x", property_id);
+    }
+}
 
 /**
  * ===========================================================================
