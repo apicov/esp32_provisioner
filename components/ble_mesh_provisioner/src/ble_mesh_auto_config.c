@@ -63,7 +63,7 @@ static bool model_supports_publication(uint16_t model_id, uint16_t company_id)
 
 /*
  * HELPER: Get publication address for a model type
- * Sensor models publish to group 0xC001, others to provisioner
+ * Sensor models and vendor models publish to group 0xC001, others to provisioner
  */
 static uint16_t get_publication_address(uint16_t model_id)
 {
@@ -71,7 +71,8 @@ static uint16_t get_publication_address(uint16_t model_id)
     case 0x1100:  // Sensor Server - publish to sensor group
         return 0xC001;
     default:
-        return 0x0001;  // Publish to provisioner
+        // Vendor models also publish to sensor group for gateway to receive
+        return 0xC001;  // Changed from 0x0001 to support vendor data forwarding
     }
 }
 
@@ -81,9 +82,9 @@ static uint16_t get_publication_address(uint16_t model_id)
  */
 static bool model_supports_subscription(uint16_t model_id, uint16_t company_id)
 {
-    // Skip vendor models for now
+    // Only vendor CLIENT models (0x0000) should subscribe, not servers (0x0001)
     if (company_id != ESP_BLE_MESH_CID_NVAL) {
-        return false;
+        return (model_id == 0x0000);  // Only vendor client receives
     }
 
     // SIG client models that support subscription
@@ -97,6 +98,7 @@ static bool model_supports_subscription(uint16_t model_id, uint16_t company_id)
 
 /*
  * HELPER: Get subscription address for a client model
+ * All client and vendor models subscribe to sensor group 0xC001
  */
 static uint16_t get_subscription_address(uint16_t model_id)
 {
@@ -104,7 +106,7 @@ static uint16_t get_subscription_address(uint16_t model_id)
     case 0x1102:  // Sensor Client - subscribe to sensor group
         return 0xC001;
     default:
-        return 0xC000;  // Default group
+        return 0xC001;  // Vendor models also subscribe to sensor group
     }
 }
 
@@ -219,7 +221,8 @@ bool configure_next_publication(uint16_t addr, mesh_node_info_t *node_info,
         common->opcode = ESP_BLE_MESH_MODEL_OP_MODEL_PUB_SET;
 
         uint16_t pub_addr = get_publication_address(model->model_id);
-        ESP_LOGI(TAG, "    Publishing to: 0x%04x", pub_addr);
+        ESP_LOGI(TAG, "    Publishing to: 0x%04x (model_id=0x%04x, cid=0x%04x)",
+                 pub_addr, model->model_id, model->company_id);
 
         set_state.model_pub_set.element_addr = node_info->unicast;
         set_state.model_pub_set.publish_addr = pub_addr;  // Use model-specific publish address

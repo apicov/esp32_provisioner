@@ -617,6 +617,15 @@ void mesh_provisioning_cb(esp_ble_mesh_prov_cb_event_t event,
             if (err != ESP_OK) {
                 ESP_LOGE(TAG, "Provisioner bind Vendor Client failed");
             }
+
+            // Subscribe Vendor Client to sensor group (0xC001) to receive IMU data
+            err = esp_ble_mesh_model_subscribe_group_addr(PROV_OWN_ADDR, 0x0001,
+                    0x0000, 0xC001);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "Provisioner subscribe Vendor Client to sensor group failed: %d", err);
+            } else {
+                ESP_LOGI(TAG, "Provisioner Vendor Client subscribed to sensor group 0xC001");
+            }
         }
         break;
     case ESP_BLE_MESH_PROVISIONER_BIND_APP_KEY_TO_MODEL_COMP_EVT:

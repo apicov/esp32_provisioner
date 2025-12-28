@@ -612,7 +612,7 @@ esp_err_t provisioner_start(void)
         return err;
     }
 
-    ESP_LOGI(TAG, "Provisioner started - nodes will publish to 0x0001");
+    ESP_LOGI(TAG, "Provisioner started - ready to receive from nodes");
     return ESP_OK;
 }
 
