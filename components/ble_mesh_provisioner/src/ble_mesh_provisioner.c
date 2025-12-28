@@ -1,17 +1,46 @@
-/*
+/* ============================================================================
  * BLE MESH PROVISIONER - Main Implementation
- * ===========================================
+ * ============================================================================
  *
- * EDUCATIONAL NOTE - FILE PURPOSE:
- * This file implements the core provisioner functionality. A provisioner is like
- * the "network administrator" of a BLE Mesh network - it brings new devices into
- * the network and sets them up.
+ * 📚 LEARNING ROADMAP:
+ * This is the HEART of the BLE Mesh network. Study this file to understand:
+ *   ⭐ Foundation - Mesh stack initialization and Bluetooth setup
+ *   ⭐⭐ Intermediate - Provisioner role, model architecture, security keys
+ *   ⭐⭐⭐ Advanced - Multi-layer encryption, message routing, vendor models
  *
- * KEY RESPONSIBILITIES:
- * 1. Initialize Bluetooth stack (controller + host)
- * 2. Set up BLE Mesh with our composition data
- * 3. Scan for and provision unprovisioned devices
- * 4. Send control messages to provisioned nodes
+ * 🎯 BLE MESH CONCEPTS COVERED:
+ *   • Provisioner Role - The "network administrator" that onboards devices
+ *   • Composition Data - How nodes advertise their capabilities
+ *   • Models - Functional units (Config, OnOff, Sensor, Vendor)
+ *   • Elements - Addressable entities within a node
+ *   • Security - Three-key system (NetKey, AppKey, DevKey)
+ *   • Bearers - PB-ADV and PB-GATT provisioning transport
+ *
+ * 💻 C/C++ TECHNIQUES DEMONSTRATED:
+ *   • Static data structures - Compile-time composition definition
+ *   • Designated initializers - Clear struct initialization (C99)
+ *   • Callback registration - Event-driven architecture
+ *   • Memory management - Stack vs heap, const correctness
+ *   • Macro patterns - ARRAY_SIZE, ESP_BLE_MESH_MODEL_* helpers
+ *
+ * 📖 PREREQUISITES:
+ *   Before studying this file, you should understand:
+ *   • Basic BLE concepts (see docs/BLE_CODE_STUDY_GUIDE.md)
+ *   • BLE Mesh architecture (see docs/LEARNING.md)
+ *   • ESP-IDF basics (tasks, logging, error handling)
+ *
+ * 🔗 RELATED FILES TO STUDY NEXT:
+ *   1. ble_mesh_callbacks.c - Event handling and provisioning flow
+ *   2. ble_mesh_auto_config.c - Automatic node configuration
+ *   3. ble_mesh_storage.c - Persistent node information
+ *
+ * 📋 KEY RESPONSIBILITIES:
+ *   1. Initialize Bluetooth stack (controller + host)
+ *   2. Set up BLE Mesh with composition data (models, elements)
+ *   3. Scan for and provision unprovisioned devices
+ *   4. Configure provisioned nodes with keys and settings
+ *   5. Send control messages to provisioned nodes
+ * ============================================================================
  */
 
 #include "ble_mesh_provisioner.h"
@@ -32,30 +61,91 @@
 
 #include <string.h>
 
+/* ===================================================================
+ * SECTION: Constants and Configuration
+ * BLE MESH CONCEPT: Device identification and security parameters
+ * DIFFICULTY: ⭐ Beginner
+ * =================================================================== */
+
 #define TAG "BLE_MESH_PROV"
 
-/*
- * Company ID for ESP32
- * Assigned by Bluetooth SIG - identifies the manufacturer
+/* BLE MESH CONCEPT: Company Identifier (CID)
+ *
+ * Every BLE Mesh device has a Company ID assigned by the Bluetooth SIG.
+ * This identifies the manufacturer and is part of the composition data.
+ *
+ * 0x02E5 = Espressif Inc.
+ *
+ * WHY IT MATTERS:
+ * - Helps identify device origin in mixed-vendor networks
+ * - Required for vendor models (custom functionality)
+ * - Part of device "fingerprint" along with Product ID/Version
+ *
+ * See: https://www.bluetooth.com/specifications/assigned-numbers/
  */
 #define CID_ESP 0x02E5
 
-/*
- * Application Key fill byte
- * The actual app key is 16 bytes filled with this value (0x12121212...)
- * In production, use a cryptographically random key!
+/* BLE MESH SECURITY: Application Key Pattern
+ *
+ * This is a DEMONSTRATION key - NOT secure for production!
+ * The 16-byte AppKey is filled with this repeated byte: 0x12121212...
+ *
+ * PRODUCTION BEST PRACTICE:
+ * Use esp_fill_random() or hardware RNG to generate cryptographic keys:
+ *   uint8_t app_key[16];
+ *   esp_fill_random(app_key, sizeof(app_key));
+ *
+ * C PATTERN: Using memset() to fill array with repeated value
+ * See: provisioner_init() where memset(prov_key.app_key, APP_KEY_OCTET, 16)
  */
 #define APP_KEY_OCTET 0x12
 
-/*
- * EDUCATIONAL NOTE - GLOBAL STATE:
+/* ===================================================================
+ * SECTION: Global State Variables
+ * BLE MESH CONCEPT: Provisioner identity and configuration
+ * C PATTERN: File-scope static variables (internal linkage)
+ * DIFFICULTY: ⭐ Beginner
+ * =================================================================== */
+
+/* C PATTERN: Static Variables and Internal Linkage
  *
- * These variables maintain the provisioner's state:
- * - dev_uuid: Our unique device identifier (16 bytes)
- * - prov_config: Configuration passed by user
- * - prov_callbacks: Optional user callbacks
+ * The 'static' keyword at file scope means:
+ * - These variables are ONLY accessible within this .c file
+ * - NOT visible to other compilation units (even if they try to 'extern')
+ * - Helps prevent naming conflicts and encapsulates state
+ * - Lives in .bss section (zero-initialized at startup)
+ *
+ * COMPARISON:
+ *   static uint8_t dev_uuid[16];      // Private to this file
+ *   uint8_t dev_uuid[16];             // Global, visible to all files
+ *   extern uint8_t dev_uuid[16];      // Declaration of global defined elsewhere
+ *
+ * WHY STATIC HERE:
+ * This state should only be modified through public API functions like
+ * provisioner_init(), not directly by external code.
+ */
+
+/* BLE MESH: Device UUID (Universal Unique Identifier)
+ *
+ * 16-byte unique identifier for this provisioner node.
+ * Format: [2-byte prefix][6-byte MAC][8-byte padding]
+ *
+ * Used for:
+ * - Identifying this device during provisioning
+ * - Filtering which devices we provision (UUID matching)
  */
 static uint8_t dev_uuid[16];
+
+/* Configuration and Callbacks
+ *
+ * These structs store:
+ * - prov_config: User settings (addresses, network parameters)
+ * - prov_callbacks: Optional function pointers for events
+ *
+ * C PATTERN: Struct by-value storage
+ * We memcpy() the user's config into our local copy so we own the data
+ * and it persists even if user's original struct goes out of scope.
+ */
 static provisioner_config_t prov_config;
 static provisioner_callbacks_t prov_callbacks;
 
@@ -148,25 +238,71 @@ static esp_ble_mesh_cfg_srv_t config_server = {
  */
 static esp_ble_mesh_client_t sensor_client;
 
-/*
- * EDUCATIONAL NOTE - VENDOR MODEL CLIENT:
- *
- * Vendor models allow custom application-specific messages beyond the
- * standard SIG models. We use this to receive bulk IMU data (all 6 axes
- * in one message) more efficiently than the standard sensor model.
- *
- * Company ID 0x0001 is used for this custom implementation.
- */
-#define VENDOR_MODEL_ID_CLIENT  0x0000
-#define VENDOR_MODEL_ID_SERVER  0x0001
-#define VENDOR_COMPANY_ID       0x0001
+/* ===================================================================
+ * SECTION: Vendor Model Definition
+ * BLE MESH CONCEPT: Custom vendor-specific models and opcodes
+ * DIFFICULTY: ⭐⭐⭐ Advanced
+ * =================================================================== */
 
-// Vendor model operations (opcodes we can receive)
-// IMPORTANT: Must have at least one 3-byte vendor opcode
-// Our IMU data opcode: 0xC00001 = ESP_BLE_MESH_MODEL_OP_3(0xC0, 0x0001)
+/* BLE MESH DEEP DIVE: Vendor Models
+ *
+ * WHY VENDOR MODELS?
+ * The Bluetooth SIG defines standard models (OnOff, Level, Sensor, etc.)
+ * but they have limitations:
+ * - Sensor model sends one property at a time (inefficient for 6-axis IMU)
+ * - Can't define custom message formats
+ * - Limited to standardized properties
+ *
+ * VENDOR MODELS let you:
+ * - Define completely custom message formats
+ * - Optimize payload for your specific use case
+ * - Implement proprietary protocols
+ *
+ * OUR USE CASE:
+ * We stream 6-axis IMU data (accel X,Y,Z + gyro X,Y,Z) from M5Stick nodes.
+ * Using a vendor model, we pack all 6 values into ONE 8-byte message
+ * instead of sending 6 separate sensor property messages.
+ *
+ * TRADE-OFF:
+ * ✅ More efficient, custom format
+ * ❌ Not interoperable with other vendors' devices
+ */
+
+/* C PATTERN: Preprocessor constants for related values
+ *
+ * Grouping related constants together improves readability and maintenance.
+ * If we change the company ID, all model definitions stay consistent.
+ */
+#define VENDOR_MODEL_ID_CLIENT  0x0000  // Our client model ID
+#define VENDOR_MODEL_ID_SERVER  0x0001  // Server model ID (on nodes)
+#define VENDOR_COMPANY_ID       0x0001  // Company ID (0x0001 = test/demo)
+
+/* BLE MESH: Vendor Opcode Structure
+ *
+ * OPCODE ANATOMY:
+ * Vendor opcodes are 3 bytes: [opcode byte][company_id low][company_id high]
+ *
+ * ESP_BLE_MESH_MODEL_OP_3(0xC0, 0x0001) creates opcode: 0xC0 0x01 0x00
+ *                                                          ^    ^^^^
+ *                                               operation  company ID
+ *
+ * WHY 3 BYTES?
+ * - SIG opcodes: 1 or 2 bytes (0x00-0xBF for 1-byte)
+ * - Vendor opcodes: 3 bytes (0xC0-0xFF range indicates vendor-specific)
+ * - Company ID prevents collisions between vendors
+ *
+ * OUR IMU DATA OPCODE:
+ * 0xC00001 = Operation 0xC0 from company 0x0001
+ * This is received when M5Stick nodes publish IMU measurements
+ *
+ * C PATTERN: Array of structs with sentinel
+ * The ESP_BLE_MESH_MODEL_OP_END acts as a terminator (like null-terminator
+ * in strings). The mesh stack iterates until it hits this end marker.
+ */
 static esp_ble_mesh_model_op_t vendor_model_op[] = {
-    ESP_BLE_MESH_MODEL_OP(ESP_BLE_MESH_MODEL_OP_3(0xC0, 0x0001), 0),  // IMU data opcode
-    ESP_BLE_MESH_MODEL_OP_END,
+    // Opcode for IMU data messages, minimum length 0 (variable)
+    ESP_BLE_MESH_MODEL_OP(ESP_BLE_MESH_MODEL_OP_3(0xC0, 0x0001), 0),
+    ESP_BLE_MESH_MODEL_OP_END,  // Sentinel: marks end of opcode array
 };
 
 /*
@@ -214,48 +350,117 @@ static esp_ble_mesh_model_t vendor_models[] = {
     ESP_BLE_MESH_VENDOR_MODEL(VENDOR_COMPANY_ID, VENDOR_MODEL_ID_CLIENT, vendor_model_op, NULL, NULL),
 };
 
-/*
- * EDUCATIONAL NOTE - ELEMENTS:
+/* ===================================================================
+ * SECTION: Elements - Addressable Entities
+ * BLE MESH CONCEPT: Element addressing and model organization
+ * DIFFICULTY: ⭐⭐ Intermediate
+ * =================================================================== */
+
+/* BLE MESH DEEP DIVE: What are Elements?
  *
- * Elements are addressable entities within a node. Each element:
- * - Gets its own unicast address
- * - Contains one or more models
- * - Represents a physical or logical "thing"
+ * CONCEPT:
+ * Elements are the "parts" of a device that can be independently addressed.
+ * Each element gets its own unicast address in the mesh network.
  *
- * Example multi-element device (ceiling fan):
- *   Element 0 (address 0x0001): Fan motor (Level model)
- *   Element 1 (address 0x0002): Light (OnOff model)
+ * WHY ELEMENTS?
+ * They allow one physical device to appear as multiple logical devices.
  *
- * Our provisioner has just 1 element with our 4 SIG models and 1 vendor model.
+ * REAL-WORLD EXAMPLE - Ceiling Fan with Light:
  *
- * ESP_BLE_MESH_ELEMENT parameters:
- * - 0: Location (0 = main/primary element)
- * - root_models: Array of SIG models in this element
- * - vendor_models: Array of vendor models in this element
+ *   Device Physical Address: 0x0010
+ *   ├─ Element 0 (address 0x0010): Fan Motor
+ *   │  └─ Models: Generic Level (speed control)
+ *   │
+ *   └─ Element 1 (address 0x0011): Light
+ *      └─ Models: Generic OnOff (light control)
+ *
+ * Now you can:
+ * - Send OnOff message to 0x0011 → controls light only
+ * - Send Level message to 0x0010 → controls fan speed only
+ *
+ * ADDRESS ALLOCATION:
+ * When a node is provisioned, it receives a PRIMARY address.
+ * If the node has N elements, it occupies addresses [primary] to [primary+N-1].
+ *
+ * OUR PROVISIONER:
+ * We have 1 element (simple case) with all our models in it.
+ * If our address is 0x0001, we only occupy address 0x0001.
+ *
+ * C PATTERN: Macro for struct array initialization
+ * ESP_BLE_MESH_ELEMENT is a macro that expands to proper struct initialization.
+ * This abstraction hides ESP-IDF internals and makes code more readable.
+ */
+
+/* Location descriptor for element
+ *
+ * From Bluetooth Mesh Model Spec:
+ * - 0x0000 = Unknown/Not applicable
+ * - 0x0001 = Front
+ * - 0x0002 = Back
+ * - 0x0003 = Top
+ * ...etc.
+ *
+ * For a provisioner, location doesn't apply, so we use 0.
  */
 static esp_ble_mesh_elem_t elements[] = {
-    ESP_BLE_MESH_ELEMENT(0, root_models, vendor_models),
+    ESP_BLE_MESH_ELEMENT(
+        0,              // Location: 0 = primary/main element
+        root_models,    // SIG-defined models (Config, OnOff, Sensor)
+        vendor_models   // Vendor-specific models (our IMU receiver)
+    ),
 };
 
-/*
- * EDUCATIONAL NOTE - COMPOSITION DATA:
+/* ===================================================================
+ * SECTION: Composition Data
+ * BLE MESH CONCEPT: Device capability advertisement
+ * C PATTERN: Designated initializers for clarity
+ * DIFFICULTY: ⭐⭐ Intermediate
+ * =================================================================== */
+
+/* BLE MESH: Composition Data - The Node's "Resume"
  *
- * This is like the "business card" of our node. It tells other nodes:
- * - Who made this device (Company ID)
- * - What elements it has
- * - What models are in each element
+ * WHAT IS IT?
+ * Composition data is the complete description of a node's capabilities.
+ * It's like a resume that says "Here's what I can do!"
  *
- * When we provision a new node, we request ITS composition data
- * to learn what it can do, then configure it appropriately.
+ * WHAT IT CONTAINS:
+ * - Company ID (CID): Who manufactured this device
+ * - Product ID (PID): What product this is
+ * - Version ID (VID): Firmware/hardware version
+ * - Elements: List of addressable parts
+ *   └─ For each element:
+ *      ├─ Location (physical placement)
+ *      ├─ SIG Models (standard functionality)
+ *      └─ Vendor Models (custom functionality)
  *
- * CID_ESP: Identifies this as an Espressif device
- * elements: Our array of elements (just one)
- * element_count: How many elements (calculated by ARRAY_SIZE macro)
+ * WHEN IS IT USED?
+ * 1. DURING PROVISIONING:
+ *    After a node joins the network, the provisioner requests composition data
+ *    via "Config Composition Data Get" message
+ *
+ * 2. FOR CONFIGURATION:
+ *    Provisioner reads composition data to learn:
+ *    - How many elements exist (to know address range)
+ *    - What models exist (to know which to configure)
+ *    - What the device can do (to set appropriate publish/subscribe)
+ *
+ * EXAMPLE FLOW:
+ *   1. Node provisioned at address 0x0010
+ *   2. Provisioner sends: Composition Data Get → 0x0010
+ *   3. Node responds with composition data
+ *   4. Provisioner sees: "Oh, element 0 has Generic OnOff Server"
+ *   5. Provisioner configures: Bind AppKey to OnOff Server model
+ *
+ * C PATTERN: ARRAY_SIZE Macro
+ * ARRAY_SIZE(arr) = sizeof(arr) / sizeof(arr[0])
+ * Calculates number of elements in a stack-allocated array at compile-time.
+ * Safer than hardcoding the count!
  */
 static esp_ble_mesh_comp_t composition = {
-    .cid = CID_ESP,                          // Company ID
-    .element_count = ARRAY_SIZE(elements),   // Number of elements
+    .cid = CID_ESP,                          // Company ID: 0x02E5 = Espressif
+    .element_count = ARRAY_SIZE(elements),   // How many elements (1 in our case)
     .elements = elements,                    // Pointer to elements array
+    // Note: pid and vid could be added here for product identification
 };
 
 /*
@@ -278,48 +483,78 @@ static esp_ble_mesh_comp_t composition = {
  */
 static esp_ble_mesh_prov_t provision;
 
-/*
- * FUNCTION: generate_dev_uuid
- * ===========================
+/* ===================================================================
+ * SECTION: UUID Generation
+ * BLE MESH CONCEPT: Device identification and filtering
+ * C PATTERN: Pointer arithmetic and memory manipulation
+ * DIFFICULTY: ⭐⭐ Intermediate
+ * =================================================================== */
+
+/**
+ * Generate Device UUID
  *
- * EDUCATIONAL NOTE:
- * Creates a unique 16-byte UUID for this device.
+ * BLE MESH CONCEPT: UUID-based Provisioning Filter
  *
- * UUID Structure:
- * [0-1]   : Prefix (e.g., 0xdddd) - for filtering during provisioning
- * [2-7]   : Device's Bluetooth MAC address (6 bytes) - ensures uniqueness
- * [8-15]  : Zeros (padding)
+ * HOW PROVISIONING DISCOVERY WORKS:
+ * 1. Unprovisioned devices broadcast "Unprovisioned Device Beacon"
+ * 2. Beacon contains 16-byte UUID
+ * 3. Provisioner filters UUIDs based on prefix match
+ * 4. Only matching UUIDs get provisioned
  *
- * WHY THIS MATTERS:
- * - Each unprovisioned device broadcasts its UUID
- * - Provisioners can filter by UUID prefix (e.g., only provision 0xdddd devices)
- * - MAC address ensures no two devices have the same UUID
- * - This is how you identify "your" devices vs. neighbor's devices
+ * UUID STRUCTURE (16 bytes total):
+ * ┌──────┬─────────────────┬──────────────────┐
+ * │ 0-1  │      2-7        │      8-15        │
+ * ├──────┼─────────────────┼──────────────────┤
+ * │PREFIX│  MAC ADDRESS    │    PADDING       │
+ * │(user)│ (hardware-based)│   (zeros)        │
+ * └──────┴─────────────────┴──────────────────┘
  *
- * Example UUID:
- * [dd dd fc e8 c0 a0 bf aa 00 00 00 00 00 00 00 00]
- *  \-/  \-----------------/  \---------------------/
- * prefix   MAC address          padding
+ * EXAMPLE:
+ * Prefix: 0xAA 0xBB
+ * MAC:    0xFC 0xE8 0xC0 0xA0 0xBF 0xAA
+ * Result: [AA BB FC E8 C0 A0 BF AA 00 00 00 00 00 00 00 00]
+ *
+ * WHY THIS DESIGN?
+ * ✅ Prefix allows "branding" - all your devices start with same bytes
+ * ✅ MAC ensures global uniqueness - no two devices have same UUID
+ * ✅ Provisioner can filter: "only provision my 0xAABB devices"
+ * ✅ Prevents accidentally provisioning neighbor's devices
+ *
+ * C PATTERN: Pointer Arithmetic
+ * uuid + 2 means "start at byte 2 of uuid array"
+ * This is equivalent to &uuid[2] but more idiomatic for memcpy
+ *
+ * @param[out] uuid    Buffer to fill with generated UUID (16 bytes)
+ * @param[in]  prefix  2-byte prefix for UUID filtering
  */
 static void generate_dev_uuid(uint8_t *uuid, const uint8_t *prefix)
 {
+    // C PATTERN: Defensive programming - validate input pointers
     if (!uuid) {
         ESP_LOGE(TAG, "Invalid device uuid");
         return;
     }
 
-    // Clear the UUID buffer
+    // C PATTERN: memset() for array initialization
+    // Sets all 16 bytes to 0 (faster than loop for large buffers)
+    // Signature: void *memset(void *s, int c, size_t n)
     memset(uuid, 0, 16);
 
-    // Set the prefix (first 2 bytes) - used for UUID matching/filtering
+    // Copy user-provided prefix (2 bytes)
+    // This allows provisioner to filter "only my devices"
     uuid[0] = prefix[0];
     uuid[1] = prefix[1];
 
-    // Copy the Bluetooth MAC address (next 6 bytes) - ensures uniqueness
-    // esp_bt_dev_get_address() returns pointer to 6-byte MAC address
+    // BLE MESH: Use hardware MAC for uniqueness
+    // esp_bt_dev_get_address() returns const uint8_t* to 6-byte MAC
+    // BD_ADDR_LEN is defined as 6 in esp_bt_defs.h
+    //
+    // C PATTERN: Pointer arithmetic
+    // uuid + 2 = address of byte 2 (where MAC starts)
     memcpy(uuid + 2, esp_bt_dev_get_address(), BD_ADDR_LEN);
 
-    // Remaining 8 bytes stay zero (padding)
+    // Bytes 8-15 remain zero (already set by memset above)
+    // These could be used for version info, batch numbers, etc.
 }
 
 /*
@@ -504,9 +739,43 @@ esp_err_t provisioner_init(const provisioner_config_t *config, const provisioner
     memcpy(&provision, &temp_prov, sizeof(provision));
 
     // STEP 6: Setup cryptographic keys
-    // Network key is automatically generated by the stack
-    // Application key is filled with a pattern (0x12121212...)
-    // In production, use cryptographically random keys!
+    //
+    // BLE MESH SECURITY: Three-Key System
+    // ====================================
+    //
+    // BLE Mesh uses three types of keys for security:
+    //
+    // 1. NETWORK KEY (NetKey):
+    //    - Encrypts network layer (addresses, TTL, sequence)
+    //    - Shared by ALL nodes in the network
+    //    - Generated automatically by provisioner
+    //    - Index: net_idx (usually 0 for primary network)
+    //
+    // 2. APPLICATION KEY (AppKey):
+    //    - Encrypts application layer (model messages)
+    //    - Can have MULTIPLE keys for different apps
+    //    - Bound to a NetKey (AppKey only valid for one network)
+    //    - Index: app_idx (we use 0 for main application)
+    //    - ⚠️  DEMO KEY HERE - use random in production!
+    //
+    // 3. DEVICE KEY (DevKey):
+    //    - Unique per device, generated during provisioning
+    //    - Used ONLY for configuration messages
+    //    - Never changes, never shared
+    //    - Not handled here (managed by mesh stack)
+    //
+    // KEY HIERARCHY:
+    //   NetKey 0
+    //   ├─ AppKey 0 (lights)
+    //   ├─ AppKey 1 (sensors)
+    //   └─ AppKey 2 (HVAC)
+    //
+    // WHY MULTIPLE APPKEYS?
+    // Allows access control: lights don't need sensor AppKey
+    //
+    // C PATTERN: memset to fill with pattern
+    // memset(ptr, value, size) fills memory with repeated byte value
+    // Our key becomes: 0x12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12
     prov_key.net_idx = config->net_idx;
     prov_key.app_idx = config->app_idx;
     memset(prov_key.app_key, APP_KEY_OCTET, sizeof(prov_key.app_key));

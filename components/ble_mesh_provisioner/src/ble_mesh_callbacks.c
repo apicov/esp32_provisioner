@@ -1452,13 +1452,47 @@ void mesh_vendor_client_cb(esp_ble_mesh_model_cb_event_t event,
          *                    VENDOR MODEL PUBLISHED MESSAGE RECEPTION
          * ════════════════════════════════════════════════════════════════════════
          *
-         * This event fires when a node publishes vendor model data (not used currently).
-         * We use direct unicast messages (MODEL_OPERATION_EVT) instead.
+         * This event fires when a node publishes vendor model data to a group address.
+         * Nodes publish to 0xC001 (sensor group), and we're subscribed to receive it.
          */
         opcode = param->client_recv_publish_msg.opcode;
         addr = param->client_recv_publish_msg.ctx->addr;
+        length = param->client_recv_publish_msg.length;
+        data = param->client_recv_publish_msg.msg;
 
         ESP_LOGI(TAG, "📦 Published vendor message from 0x%04x, opcode=0x%06" PRIx32, addr, opcode);
+
+        // Call external handler (forwards to MQTT bridge)
+        provisioner_vendor_msg_handler(addr, opcode, data, length);
+
+        // Log IMU data for debugging
+        if (opcode == VENDOR_MODEL_OP_IMU_DATA) {
+            // Compact IMU data (8 bytes: timestamp + all 6 axes in int8_t)
+            if (length == 8) {
+                typedef struct {
+                    uint16_t timestamp_ms;
+                    int8_t accel_x;  // 0.1g units
+                    int8_t accel_y;
+                    int8_t accel_z;
+                    int8_t gyro_x;   // 10 dps units
+                    int8_t gyro_y;
+                    int8_t gyro_z;
+                } __attribute__((packed)) imu_compact_msg_t;
+
+                imu_compact_msg_t *imu = (imu_compact_msg_t*)data;
+
+                // Decode: multiply back to original units
+                float ax = imu->accel_x * 0.1f;  // 0.1g → g
+                float ay = imu->accel_y * 0.1f;
+                float az = imu->accel_z * 0.1f;
+                int gx = imu->gyro_x * 10;       // 10dps → dps
+                int gy = imu->gyro_y * 10;
+                int gz = imu->gyro_z * 10;
+
+                ESP_LOGI(TAG, "📊 IMU [t=%u] Accel:[%.1f,%.1f,%.1f]g Gyro:[%d,%d,%d]dps",
+                         imu->timestamp_ms, ax, ay, az, gx, gy, gz);
+            }
+        }
         break;
 
     case ESP_BLE_MESH_CLIENT_MODEL_SEND_TIMEOUT_EVT:

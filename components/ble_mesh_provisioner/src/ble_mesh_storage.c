@@ -1,36 +1,102 @@
-/*
+/* ============================================================================
  * BLE MESH PROVISIONER - NODE STORAGE
- * ====================================
+ * ============================================================================
  *
- * This file provides simple in-memory storage for provisioned nodes.
- * In a production system, you would want to store this data in non-volatile
- * storage (NVS/flash) so nodes remain known after reboot.
+ * 📚 LEARNING ROADMAP:
+ *   ⭐ Foundation - Static arrays, memcpy/memcmp, linear search
+ *   ⭐⭐ Intermediate - Data persistence concepts, NVS architecture
+ *   ⭐⭐⭐ Advanced - Production storage design patterns
+ *
+ * 🎯 BLE MESH CONCEPTS COVERED:
+ *   • Node Information Management - Tracking provisioned devices
+ *   • Unicast Addressing - Node identification in the mesh
+ *   • State Synchronization - Maintaining device state awareness
+ *
+ * 💻 C/C++ TECHNIQUES DEMONSTRATED:
+ *   • Static Array Storage - Compile-time allocation vs dynamic
+ *   • Linear Search - O(n) lookup, trade-offs
+ *   • memcpy/memcmp - Efficient memory operations
+ *   • Defensive Programming - NULL checks, boundary validation
+ *   • Pass-by-pointer - Output parameters pattern
+ *
+ * 📝 CURRENT IMPLEMENTATION:
+ * ==========================
+ *
+ * This is a SIMPLE in-memory storage for educational purposes.
+ * Data is stored in a static array and LOST on reboot.
  *
  * WHAT IS STORED:
- * For each provisioned node, we track:
- *   - UUID: Device's unique 16-byte identifier
- *   - Unicast address: The node's mesh address (where to send messages)
- *   - Element count: Number of addressable entities in the node
- *   - OnOff state: Last known state of the Generic OnOff model
+ * For each provisioned node:
+ *   - UUID (16 bytes): Unique device identifier
+ *   - Unicast address: Where to send messages
+ *   - Element count: Number of addressable entities
+ *   - Model information: Discovered capabilities
+ *   - Configuration state: Binding/publication progress
  *
  * WHY STORE THIS:
- * - We need the unicast address to send control messages
- * - UUID helps identify devices if they rejoin the network
- * - Element count tells us how many addresses this node occupies
- * - State tracking allows us to maintain sync with the device
+ * ✅ Control - Need unicast address to send commands
+ * ✅ Recovery - UUID helps identify rejoining devices
+ * ✅ Addressing - Element count = address range
+ * ✅ State sync - Track configuration completion
  *
- * LIMITATIONS:
- * - Storage is volatile (lost on reboot)
- * - Maximum 10 nodes (MESH_STORAGE_MAX_NODES)
- * - No persistence to flash
- * - No node removal function (only add/update)
+ * LIMITATIONS (What's missing):
+ * ❌ Volatile - Lost on reboot/power cycle
+ * ❌ Size limited - Max 10 nodes hardcoded
+ * ❌ No removal - Can only add/update
+ * ❌ Linear search - O(n) lookup time
  *
- * PRODUCTION IMPROVEMENTS:
- * - Use NVS (Non-Volatile Storage) API for persistence
- * - Add node removal/update functions
- * - Store device key (for secure configuration)
- * - Store subscription lists and publication addresses
- * - Add timestamp for last seen/communicated
+ * 🏭 PRODUCTION IMPROVEMENTS:
+ * ===========================
+ *
+ * ESP32 NVS (Non-Volatile Storage) Integration:
+ * ```c
+ * #include "nvs_flash.h"
+ * #include "nvs.h"
+ *
+ * // Initialize NVS
+ * esp_err_t ret = nvs_flash_init();
+ * nvs_handle_t nvs_handle;
+ * nvs_open("mesh_storage", NVS_READWRITE, &nvs_handle);
+ *
+ * // Save node (binary blob)
+ * nvs_set_blob(nvs_handle, "node_0", &node_info, sizeof(mesh_node_info_t));
+ * nvs_commit(nvs_handle);
+ *
+ * // Load node
+ * size_t size = sizeof(mesh_node_info_t);
+ * nvs_get_blob(nvs_handle, "node_0", &node_info, &size);
+ * ```
+ *
+ * Additional Features for Production:
+ * • Device Key storage (for secure reconfiguration)
+ * • Subscription/publication lists
+ * • Last-seen timestamps
+ * • Network key indices
+ * • Hash table for O(1) unicast lookups
+ * • Node removal/expiry logic
+ * • Wear-leveling considerations
+ *
+ * C PATTERN NOTE: Static vs Dynamic Allocation
+ * ============================================
+ *
+ * CURRENT (Static):
+ *   static mesh_node_info_t nodes[10];  // 10 * sizeof(mesh_node_info_t) bytes
+ *   ✅ Fast allocation (compile-time)
+ *   ✅ No fragmentation
+ *   ✅ Automatic cleanup
+ *   ❌ Fixed size
+ *   ❌ Wastes memory if underutilized
+ *
+ * ALTERNATIVE (Dynamic):
+ *   mesh_node_info_t *nodes = malloc(max_nodes * sizeof(mesh_node_info_t));
+ *   ✅ Flexible sizing
+ *   ✅ Can grow/shrink
+ *   ❌ Requires free()
+ *   ❌ Can fragment heap
+ *   ❌ Slower allocation
+ *
+ * For embedded systems with predictable workload, static is often preferred.
+ * ============================================================================
  */
 
 #include "ble_mesh_storage.h"
@@ -111,11 +177,30 @@ esp_err_t mesh_storage_add_node(const uint8_t uuid[16], uint16_t unicast, uint8_
         return ESP_ERR_NO_MEM;
     }
 
-    // Check if node already exists (compare UUIDs)
-    // This handles the case where a node is re-provisioned
+    // C PATTERN: UUID Comparison with memcmp()
+    //
+    // memcmp() signature: int memcmp(const void *s1, const void *s2, size_t n)
+    // Returns: 0 if equal, <0 if s1<s2, >0 if s1>s2
+    //
+    // WHY memcmp() instead of manual loop?
+    // ✅ Optimized assembly for the platform
+    // ✅ Handles alignment correctly
+    // ✅ Clearer intent
+    //
+    // ALTERNATIVE (manual comparison):
+    //   bool uuids_equal = true;
+    //   for (int j = 0; j < 16; j++) {
+    //       if (nodes[i].uuid[j] != uuid[j]) {
+    //           uuids_equal = false;
+    //           break;
+    //       }
+    //   }
+    //
+    // Check if node already exists (handles re-provisioning)
     for (int i = 0; i < node_count; i++) {
-        if (memcmp(nodes[i].uuid, uuid, 16) == 0) {
+        if (memcmp(nodes[i].uuid, uuid, 16) == 0) {  // UUIDs match
             ESP_LOGW(TAG, "Node already exists, updating");
+            // Update existing entry (idempotent operation)
             nodes[i].unicast = unicast;
             nodes[i].elem_num = elem_num;
             nodes[i].onoff_state = onoff_state;
@@ -123,12 +208,22 @@ esp_err_t mesh_storage_add_node(const uint8_t uuid[16], uint16_t unicast, uint8_
         }
     }
 
-    // Add new node to the end of the array
-    memcpy(nodes[node_count].uuid, uuid, 16);
-    nodes[node_count].unicast = unicast;
-    nodes[node_count].elem_num = elem_num;
+    // C PATTERN: Struct Member Assignment
+    //
+    // Add new node to next available slot
+    // Note: We use memcpy for array (uuid), direct assignment for scalars
+    //
+    // WHY memcpy for uuid?
+    // Array assignment doesn't work: nodes[i].uuid = uuid; // ❌ Compiler error!
+    // Must copy element-by-element or use memcpy
+    //
+    // memcpy() signature: void *memcpy(void *dest, const void *src, size_t n)
+    // Copies n bytes from src to dest
+    memcpy(nodes[node_count].uuid, uuid, 16);  // Copy 16-byte UUID
+    nodes[node_count].unicast = unicast;       // Direct scalar assignment
+    nodes[node_count].elem_num = elem_num;     // Direct scalar assignment
     nodes[node_count].onoff_state = onoff_state;
-    node_count++;
+    node_count++;  // Increment AFTER all fields set (defensive)
 
     ESP_LOGI(TAG, "Node added: unicast=0x%04x, elem_num=%d, total=%d", unicast, elem_num, node_count);
     return ESP_OK;

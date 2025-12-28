@@ -1,23 +1,92 @@
-/*
- * ═══════════════════════════════════════════════════════════════════════════
+/* ============================================================================
  *              AUTOMATIC MODEL CONFIGURATION STATE MACHINE
- * ═══════════════════════════════════════════════════════════════════════════
+ * ============================================================================
  *
- * This module implements automatic configuration of newly provisioned nodes
- * by parsing their composition data and configuring all discovered models.
+ * 📚 LEARNING ROADMAP:
+ *   ⭐⭐ Intermediate - State machines, sequential async operations
+ *   ⭐⭐⭐ Advanced - BLE Mesh configuration protocol, model discovery
  *
- * CONFIGURATION FLOW:
- * 1. Parse composition data → Discover all models
- * 2. Add AppKey to node
- * 3. Bind AppKey to ALL discovered models (sequentially)
- * 4. Configure publication for ALL server models
- * 5. Node ready for operation
+ * 🎯 BLE MESH CONCEPTS COVERED:
+ *   • Model Configuration - AppKey binding, publish/subscribe setup
+ *   • Composition Data Parsing - Discovering node capabilities
+ *   • Group Addressing - Using 0xC001 for sensor data routing
+ *   • Server vs Client Models - Different configuration requirements
+ *   • DevKey vs AppKey - When each is used
  *
- * WHY AUTOMATIC?
- * - Works with ANY combination of models
- * - No hardcoded model IDs
- * - Extensible to new model types
- * - Reduces provisioner code complexity
+ * 💻 C/C++ TECHNIQUES DEMONSTRATED:
+ *   • State Machine Pattern - Sequential async operation management
+ *   • Iterator Pattern - Processing array elements one-by-one
+ *   • Switch-based Polymorphism - Different behavior per model type
+ *   • Boolean State Flags - Tracking completion of async operations
+ *   • Early Return Pattern - Simplifying nested conditionals
+ *
+ * 🔄 STATE MACHINE DESIGN:
+ *
+ * PROBLEM:
+ * After provisioning, a node needs multiple configuration steps executed
+ * SEQUENTIALLY (each waits for previous to complete):
+ *
+ *   1. Add AppKey    → 2. Bind Model[0] → 3. Bind Model[1] → ...
+ *      ↓ wait ack        ↓ wait ack          ↓ wait ack
+ *
+ * TRADITIONAL APPROACH (callback hell):
+ *   void step1_done() { start_step2(); }
+ *   void step2_done() { start_step3(); }
+ *   void step3_done() { start_step4(); }
+ *   // Deeply nested, hard to maintain
+ *
+ * OUR APPROACH (state machine with progress tracking):
+ *   - Store current state in node_info struct
+ *   - Each callback checks "what's next?" and advances
+ *   - Cleaner, easier to debug, scalable
+ *
+ * STATE PROGRESSION:
+ *
+ *   ┌─────────────────────────────────────────────────────────────┐
+ *   │ 1. COMPOSITION DATA RECEIVED                                │
+ *   │    • Parse all models → store in node_info.models[]        │
+ *   │    • Initialize: next_model_to_bind = 0                    │
+ *   └──────────────────┬──────────────────────────────────────────┘
+ *                      ▼
+ *   ┌─────────────────────────────────────────────────────────────┐
+ *   │ 2. APPKEY BINDING PHASE                                     │
+ *   │    Loop: bind_next_model()                                  │
+ *   │    • Check models[next_model_to_bind]                       │
+ *   │    • If needs AppKey → send bind, wait for ack              │
+ *   │    • On ack → next_model_to_bind++, repeat                  │
+ *   │    • If all done → advance to publication                   │
+ *   └──────────────────┬──────────────────────────────────────────┘
+ *                      ▼
+ *   ┌─────────────────────────────────────────────────────────────┐
+ *   │ 3. PUBLICATION CONFIG PHASE                                 │
+ *   │    Loop: configure_next_publication()                       │
+ *   │    • Check models[next_model_to_pub]                        │
+ *   │    • If server model → set publish address, wait for ack    │
+ *   │    • On ack → next_model_to_pub++, repeat                   │
+ *   │    • If all done → advance to subscription                  │
+ *   └──────────────────┬──────────────────────────────────────────┘
+ *                      ▼
+ *   ┌─────────────────────────────────────────────────────────────┐
+ *   │ 4. SUBSCRIPTION CONFIG PHASE                                │
+ *   │    Loop: subscribe_next_model()                             │
+ *   │    • Check models[next_model_to_sub]                        │
+ *   │    • If client model → add subscription, wait for ack       │
+ *   │    • On ack → next_model_to_sub++, repeat                   │
+ *   │    • If all done → NODE READY! 🎉                           │
+ *   └─────────────────────────────────────────────────────────────┘
+ *
+ * WHY THIS APPROACH?
+ * ✅ Automatic - Works with ANY combination of models
+ * ✅ No hardcoding - Discovers models from composition data
+ * ✅ Extensible - Add new model types by updating helper functions
+ * ✅ Robust - Handles failures gracefully (skip and continue)
+ * ✅ Debuggable - Clear state visible in logs
+ *
+ * KEY C PATTERNS USED:
+ * • while() loop with iterator - process next unconfigured model
+ * • Early return - "return true" when async operation started
+ * • Fall-through logic - skip non-applicable models efficiently
+ * ============================================================================
  */
 
 #include "ble_mesh_auto_config.h"
@@ -27,18 +96,68 @@
 
 #define TAG "AUTO_CONFIG"
 
-/*
- * HELPER: Check if model supports publication
- * Server models can publish their state, client models cannot.
+/* ===================================================================
+ * SECTION: Model Classification Helpers
+ * BLE MESH CONCEPT: Server vs Client model behavior
+ * C PATTERN: Switch-based classification lookup
+ * DIFFICULTY: ⭐⭐ Intermediate
+ * =================================================================== */
+
+/**
+ * Check if model supports publication
+ *
+ * BLE MESH CONCEPT: Publication Model
+ * ====================================
+ *
+ * SERVER MODELS:
+ * - Publish their STATE changes (e.g., "light is now ON")
+ * - Examples: OnOff Server, Sensor Server, Level Server
+ * - Think: "I have data to share"
+ *
+ * CLIENT MODELS:
+ * - Do NOT publish (they send commands and receive responses)
+ * - Examples: OnOff Client, Sensor Client
+ * - Think: "I control others or request data"
+ *
+ * PUBLISH MECHANISM:
+ * When a server model's state changes, it automatically publishes
+ * a status message to its configured publish address.
+ *
+ * Example:
+ *   1. Light turns ON (state change)
+ *   2. OnOff Server automatically publishes OnOff Status to 0xC001
+ *   3. All subscribers of 0xC001 receive the update
+ *
+ * C PATTERN: Guard Clause First
+ * Check special cases (vendor models) before the switch statement.
+ * This avoids a huge switch with vendor IDs.
+ *
+ * @param model_id    SIG model ID (e.g., 0x1000 = Generic OnOff Server)
+ * @param company_id  Company ID (ESP_BLE_MESH_CID_NVAL = SIG model)
+ * @return true if model publishes state, false otherwise
  */
 static bool model_supports_publication(uint16_t model_id, uint16_t company_id)
 {
-    // Vendor models: typically support publication
+    // BLE MESH: Vendor models (non-SIG)
+    // ESP_BLE_MESH_CID_NVAL (0xFFFF) means "not a vendor model" (it's SIG)
+    // Any other company_id means it's a vendor model
     if (company_id != ESP_BLE_MESH_CID_NVAL) {
+        // Vendor models: typically support publication
+        // Our vendor models (IMU data) publish sensor readings
         return true;
     }
 
-    // SIG models that support publication (server models)
+    // C PATTERN: Switch for SIG model classification
+    // Organized by model type for clarity
+    //
+    // BLE MESH MODEL NUMBERS:
+    // 0x1000 series = Generic models (OnOff, Level, Power, Battery)
+    // 0x1100 series = Sensor models
+    // 0x1200 series = Time models
+    // 0x1300 series = Scene models
+    //
+    // EVEN numbers = SERVER models (e.g., 0x1000 = OnOff Server)
+    // ODD numbers  = CLIENT models (e.g., 0x1001 = OnOff Client)
     switch (model_id) {
     case 0x1000:  // Generic OnOff Server
     case 0x1002:  // Generic Level Server
@@ -61,18 +180,49 @@ static bool model_supports_publication(uint16_t model_id, uint16_t company_id)
     }
 }
 
-/*
- * HELPER: Get publication address for a model type
- * Sensor models and vendor models publish to group 0xC001, others to provisioner
+/**
+ * Get publication address for a model type
+ *
+ * BLE MESH CONCEPT: Group Addresses for Pub/Sub
+ * ==============================================
+ *
+ * ADDRESS TYPES:
+ * • 0x0001-0x7FFF: Unicast (specific device)
+ * • 0xC000-0xFEFF: Group (multiple subscribers)
+ * • 0xFFFF:        All nodes (broadcast)
+ *
+ * GROUP 0xC001: "Sensor Data Group"
+ * We use this as a central hub for all sensor data:
+ * - IMU sensors publish to 0xC001
+ * - Heart rate sensors publish to 0xC001
+ * - Gateways subscribe to 0xC001
+ * - Provisioner subscribes to 0xC001
+ *
+ * WHY GROUP ADDRESSING?
+ * ✅ Decoupling: Publishers don't need to know all subscribers
+ * ✅ Efficiency: One publish reaches multiple subscribers
+ * ✅ Flexibility: Add/remove subscribers without reconfiguring publishers
+ *
+ * ALTERNATIVE DESIGN (not used here):
+ * Could publish to provisioner's unicast (0x0001), but then:
+ * ❌ Only provisioner gets data (gateways excluded)
+ * ❌ Tightly coupled architecture
+ *
+ * @param model_id  SIG model ID
+ * @return Group address where this model should publish
  */
 static uint16_t get_publication_address(uint16_t model_id)
 {
+    // BLE MESH: All sensor-related models publish to sensor group
+    // This allows multiple receivers (provisioner, gateways, displays)
     switch (model_id) {
-    case 0x1100:  // Sensor Server - publish to sensor group
+    case 0x1100:  // Sensor Server - publish sensor data
         return 0xC001;
     default:
-        // Vendor models also publish to sensor group for gateway to receive
-        return 0xC001;  // Changed from 0x0001 to support vendor data forwarding
+        // Vendor models (IMU, custom sensors) also use sensor group
+        // Changed from 0x0001 (unicast to provisioner) to support
+        // multi-subscriber architecture (gateways + provisioner)
+        return 0xC001;
     }
 }
 
@@ -130,29 +280,85 @@ static bool model_needs_appkey_binding(uint16_t model_id, uint16_t company_id)
     return true;
 }
 
-/*
- * Bind next model in sequence
- * Returns true if binding was initiated, false if all done
+/* ===================================================================
+ * SECTION: State Machine Core Functions
+ * BLE MESH CONCEPT: Sequential configuration protocol
+ * C PATTERN: Iterator with early return
+ * DIFFICULTY: ⭐⭐⭐ Advanced
+ * =================================================================== */
+
+/**
+ * Bind next model to AppKey (State Machine Step 2)
+ *
+ * BLE MESH CONCEPT: AppKey Binding
+ * =================================
+ *
+ * WHAT IS MODEL APP BINDING?
+ * After a node is provisioned and has the AppKey, each MODEL must be
+ * explicitly bound to that AppKey before it can use it.
+ *
+ * WHY BINDING IS NEEDED:
+ * - A node can have multiple AppKeys (e.g., AppKey[0] for lights, AppKey[1] for HVAC)
+ * - Each model needs to know WHICH AppKey to use for encryption
+ * - Binding says: "Model X, use AppKey[0] for your messages"
+ *
+ * BINDING PROCESS:
+ *   Provisioner → Node: "MODEL_APP_BIND: Element=0x0010, Model=0x1000, AppKey=0"
+ *   Node → Provisioner: "MODEL_APP_STATUS: Success, bound!"
+ *
+ * CONFIGURATION MODELS EXCEPTION:
+ * Config Server (0x0000) and Config Client (0x0001) use DevKey, NOT AppKey.
+ * These models handle network configuration and must work even if AppKeys change.
+ *
+ * C PATTERN: while() Loop with Early Return
+ * ==========================================
+ *
+ * This pattern is elegant for processing a list asynchronously:
+ *
+ * while (has_more_items) {
+ *     item = get_next_item();
+ *     if (should_skip(item)) { advance(); continue; }  // Skip quickly
+ *     if (start_async_operation(item)) {
+ *         return true;  // ← Early return! Wait for callback
+ *     }
+ * }
+ * return false;  // All done
+ *
+ * The key insight: We only process ONE item per call, then return.
+ * When the async operation completes, the callback calls us again,
+ * and we pick up where we left off (iterator advanced).
+ *
+ * @param addr       Node's unicast address
+ * @param node_info  Node state (contains models[] and next_model_to_bind index)
+ * @param common     Common parameters for mesh message
+ * @param prov_key   Network and application keys
+ * @return true if binding started (wait for ack), false if all done
  */
 bool bind_next_model(uint16_t addr, mesh_node_info_t *node_info,
                      esp_ble_mesh_client_common_param_t *common,
                      struct esp_ble_mesh_key *prov_key)
 {
-    // Find next model that needs binding
+    // C PATTERN: Iterator-based processing
+    // Loop through models array starting from last position
+    // next_model_to_bind acts as our "iterator" or "cursor"
     while (node_info->next_model_to_bind < node_info->model_count) {
         int idx = node_info->next_model_to_bind;
         node_model_info_t *model = &node_info->models[idx];
 
-        // Skip if already bound
+        // C PATTERN: Guard clauses for early skip
+        // Check conditions that allow us to skip this model
+
+        // Skip if already bound (idempotency check)
         if (model->appkey_bound) {
             node_info->next_model_to_bind++;
             continue;
         }
 
-        // Skip if model doesn't need AppKey
+        // BLE MESH: Config models use DevKey, not AppKey
+        // Skip binding for Configuration Server/Client (0x0000, 0x0001)
         if (!model_needs_appkey_binding(model->model_id, model->company_id)) {
             ESP_LOGI(TAG, "  Skipping model 0x%04x (uses DevKey)", model->model_id);
-            model->appkey_bound = true;  // Mark as "done"
+            model->appkey_bound = true;  // Mark as "done" so we don't retry
             node_info->next_model_to_bind++;
             continue;
         }
